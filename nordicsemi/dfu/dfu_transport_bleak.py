@@ -1,11 +1,16 @@
+from os.path import join as path_join
 import asyncio
-from enum import Enum, IntEnum
 import logging
-import binascii
-import sys
+import time
+from shutil import rmtree
+from tempfile import mkdtemp
+from binascii import crc32
+
+# Nordic libraries
+from nordicsemi.dfu.package import Package
 
 # TODO no wild card imports
-from ble_common import *
+from nordicsemi.dfu.ble_common import *
 
 from bleak import BleakClient, discover
 from bleak.exc import BleakError
@@ -46,14 +51,59 @@ class _ATimeoutQueue(asyncio.Queue):
             return await asyncio.wait_for(super().get(), timeout)
 
 
-def enum2str(enumclass, val):
-    """
-    enumclass - a Enum class, either instance or class 
-    """
-    try:
-        return enumclass(val).name
-    except ValueError:
-        return "{}.<unknown {}>".format(enumclass.__name__, val)
+
+class DfuImage:
+    """ Paths to a binary(firmware) file with init_packet """
+    def __init__(self, unpacked_zip, firmware):
+        self.init_packet = path_join(unpacked_zip, firmware.dat_file)
+        self.bin_file = path_join(unpacked_zip, firmware.bin_file)
+
+class DfuImagePkg:
+    # TODO this class not needed!? either add this to class Manifest 
+    # or extend it like `ManifestWithPaths(Manifest)`
+    """ Class to abstract the DFU zip Package structure and only expose
+    init_packet and binary file paths. """
+
+
+    def __init__(self, zip_file_path):
+        """
+        @param zip_file_path: Path to the zip file with the firmware to upgrade
+        """
+        self.temp_dir     = mkdtemp(prefix="nrf_dfu_")
+        self.unpacked_zip = path_join(self.temp_dir, 'unpacked_zip')
+        self.manifest     = Package.unpack_package(zip_file_path, self.unpacked_zip)
+
+        self.images = {}
+
+        if self.manifest.softdevice_bootloader:
+            k = "softdevice_bootloader"
+            self.images[k] = DfuImage(self.unpacked_zip, self.manifest.softdevice_bootloader)
+
+        if self.manifest.softdevice:
+            k = "softdevice"
+            self.images[k] = DfuImage(self.unpacked_zip, self.manifest.softdevice)
+
+        if self.manifest.bootloader:
+            k = "bootloader"
+            self.images[k] = DfuImage(self.unpacked_zip, self.manifest.bootloader)
+
+        if self.manifest.application:
+            k = "application"
+            self.images[k] = DfuImage(self.unpacked_zip, self.manifest.application)
+
+    def __del__(self):
+        """
+        Destructor removes the temporary directory for the unpacked zip
+        :return:
+        """
+        rmtree(self.temp_dir)
+
+    def get_total_size(self):
+        total_size = 0
+        for name, image in self.images.items():
+            total_size += image.bin_file
+        return total_size
+
 
 
 class DfuDevice:
@@ -62,12 +112,12 @@ class DfuDevice:
     """
 
     def __init__(self, *args, **kwargs):
-        address = kwargs.get("address")
-        if address is None:
+        self.address = kwargs.get("address")
+        if self.address is None:
             raise ValueError("invalid address")
 
         timeout = kwargs.get("timeout", 10)
-        self._bleclnt = BleakClient(address, timeout=timeout)
+        self._bleclnt = BleakClient(self.address, timeout=timeout)
 
         # TODO what packet_size? 20 seems small --> slow
         # packet size ATT_MTU_DEFAULT - 3
@@ -80,10 +130,12 @@ class DfuDevice:
         self.RETRIES_NUMBER = 3
 
     async def __aenter__(self):
+        logger.debug("{} - connecting...".format(self.address))
         await self._bleclnt.connect()
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
+        logger.debug("{} - disconnecting...".format(self.address))
         await self._bleclnt.disconnect()
 
     async def cp_cmd(self, opcode, **kwargs):
@@ -160,7 +212,7 @@ class DfuDevice:
             await self._bleclnt.write_gatt_char(
                 BLE_UUID.C_DFU_PACKET_DATA, packet, response=True
             )
-            crc = binascii.crc32(packet, crc) & 0xFFFFFFFF
+            crc = crc32(packet, crc) & 0xFFFFFFFF
             offset += len(packet)
             current_pnr += 1
             if self.prn == current_pnr:
@@ -178,7 +230,7 @@ class DfuDevice:
                 return False
 
             expected_crc = (
-                binascii.crc32(init_packet[: response["offset"]]) & 0xFFFFFFFF
+                crc32(init_packet[: response["offset"]]) & 0xFFFFFFFF
             )
 
             if expected_crc != response["crc"]:
@@ -233,7 +285,7 @@ class DfuDevice:
                 # Nothing to recover
                 return
 
-            expected_crc = binascii.crc32(firmware[: response["offset"]]) & 0xFFFFFFFF
+            expected_crc = crc32(firmware[: response["offset"]]) & 0xFFFFFFFF
             remainder = response["offset"] % response["max_size"]
 
             if expected_crc != response["crc"]:
@@ -242,7 +294,7 @@ class DfuDevice:
                     remainder if remainder != 0 else response["max_size"]
                 )
                 response["crc"] = (
-                    binascii.crc32(firmware[: response["offset"]]) & 0xFFFFFFFF
+                    crc32(firmware[: response["offset"]]) & 0xFFFFFFFF
                 )
                 return
 
@@ -262,7 +314,7 @@ class DfuDevice:
                     # Remove corrupted data.
                     response["offset"] -= remainder
                     response["crc"] = (
-                        binascii.crc32(firmware[: response["offset"]]) & 0xFFFFFFFF
+                        crc32(firmware[: response["offset"]]) & 0xFFFFFFFF
                     )
                     return
 
@@ -297,6 +349,27 @@ class DfuDevice:
             logger.info("progress at {}".format(len(data)))
 
 
+    async def send_image_package(self, imgpkg):
+        """
+        @imgpkg a DfuImagePkg instance
+        """
+        for name, image in imgpkg.images.items():
+            start_time = time.time()
+
+            logger.info("Sending init packet for {} ...".format(name))
+            with open(image.init_packet, 'rb') as f:
+                data    = f.read()
+                await self.send_init_packet(data)
+
+            logger.info("Sending firmware bin file for {}...".format(name))
+            with open(image.bin_file, 'rb') as f:
+                data    = f.read()
+                await self.send_firmware(data)
+
+            end_time = time.time()
+            delta_time = end_time - start_time
+            logger.info("Image sent for {} in {0}s".format(name, delta_time))
+
 async def scan_dfu_devices(timeout=10, **kwargs):
     devices = []
     candidates = await discover(timeout=timeout)
@@ -323,45 +396,4 @@ async def scan_dfu_devices(timeout=10, **kwargs):
             logger.debug("ignoring device={}".format(d))
 
     return devices
-
-
-def set_verbose(verbose_level):
-    loggers = [logging.getLogger("nrfdfu_defs"), logger]
-
-    if verbose_level <= 0:
-        level = logging.WARNING
-    elif verbose_level == 2:
-        level = logging.INFO
-    elif verbose_level >= 3:
-        level = logging.DEBUG
-
-    if verbose_level >= 4:
-        bleak_logger = logging.getLogger("bleak")
-        loggers.append(bleak_logger)
-
-    handler = logging.StreamHandler(sys.stderr)
-    handler.setLevel(level)
-
-    formatter = logging.Formatter("%(levelname)s:%(name)s:%(lineno)d: %(message)s")
-    handler.setFormatter(formatter)
-
-    for l in loggers:
-        l.setLevel(level)
-        l.addHandler(handler)
-
-
-async def run(address):
-    async with DfuDevice(address) as dev:
-        pass
-
-
-def main():
-    set_verbose(3)
-    logger.debug("Starting")
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(scan_dfu_devices())
-
-
-if __name__ == "__main__":
-    main()
 
