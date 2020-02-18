@@ -101,8 +101,9 @@ class DfuImagePkg:
     def get_total_size(self):
         total_size = 0
         for name, image in self.images.items():
-            total_size += image.bin_file
+            total_size += os.path.getsize(image.bin_file)
         return total_size
+
 
 
 

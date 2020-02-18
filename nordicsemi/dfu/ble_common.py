@@ -109,6 +109,7 @@ class OP_CODE(IntEnum):
     """ 
     operation/command codes to control point characteristic.
     names (more or less) according to C enum nrf_dfu_op_t (OP_CODE) 
+    `INVALID =  0xFF` excluded
     """
 
     # fmt: off
@@ -118,14 +119,13 @@ class OP_CODE(IntEnum):
     CRC_GET            =  0x03 # aka CalcChecSum
     OBJECT_EXECUTE     =  0x04 # aka Execute
     OBJECT_SELECT      =  0x06 # aka ReadObject
-    MTU_GET            =  0x07
-    OBJECT_WRITE       =  0x08
-    PING               =  0x09
+    MTU_GET            =  0x07 # aka GetSerialMTU
+    OBJECT_WRITE       =  0x08 # aka WriteObject
+    PING               =  0x09 # aka Ping
     HARDWARE_VERSION   =  0x0A
     FIRMWARE_VERSION   =  0x0B
     ABORT              =  0x0C
-    RESPONSE           =  0x60
-    INVALID            =  0xFF
+    RESPONSE           =  0x60 # aka Response
     # fmt: on
 
 
