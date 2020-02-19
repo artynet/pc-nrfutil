@@ -1,4 +1,5 @@
 from os.path import join as path_join
+from os.path import getsize
 import asyncio
 import logging
 import time
@@ -11,13 +12,18 @@ from nordicsemi.dfu.package import Package
 
 # TODO no wild card imports
 from nordicsemi.dfu.ble_common import BLE_UUID
-from nordicsemi.dfu.operation import OP_CODE, RES_CODE, OBJ_TYPE, op_txd_pack, op_rxd_unpack
+from nordicsemi.dfu.operation import OP_CODE, RES_CODE, OBJ_TYPE, op_txd_pack, op_rxd_unpack, DfuOperationError
 
 from bleak import BleakClient, discover
 from bleak.exc import BleakError
 
 logger = logging.getLogger(__name__)
 
+class NordicSemiException(Exception):
+    pass
+
+class ValidationException(Exception):
+    pass
 
 class _ATimeoutEvent(asyncio.Event):
     """ 
@@ -102,7 +108,7 @@ class DfuImagePkg:
     def get_total_size(self):
         total_size = 0
         for name, image in self.images.items():
-            total_size += os.path.getsize(image.bin_file)
+            total_size += getsize(image.bin_file)
         return total_size
 
 
@@ -128,7 +134,7 @@ class DfuDevice:
         self.packet_size = 20
 
         self._evt_opcmd = _ATimeoutEvent()
-        self.prn = 0
+        self.prn = 0 #TODO prn not yet supported
         self.RETRIES_NUMBER = 3
 
     async def __aenter__(self):
@@ -174,16 +180,12 @@ class DfuDevice:
         await self._bleclnt.write_gatt_char(cpuuid, txdata, response=True)
 
         if not await self._evt_opcmd.wait(6):
-            raise NrfDfuOperationError(
+            raise DfuOperationError(
                 "CP Operation response timeout {}".format(opcode)
             )
 
+        await self._bleclnt.stop_notify(cpuuid, crc_response_handler)
         return op_rxd_unpack(opcode, rxdata)
-
-    async def dpkg_write(self, data):
-        await self._bleclnt.write_gatt_char(
-            BLE_UUID.C_DFU_PACKET_DATA, data, response=True
-        )
 
     async def _validate_crc(self, crc, offset):
         response = await self.cp_cmd(OP_CODE.CRC_GET)
@@ -219,7 +221,7 @@ class DfuDevice:
             current_pnr += 1
             if self.prn == current_pnr:
                 current_pnr = 0
-                await self._validate_crc(crc, offset)
+                # TODO read CRC from CONTROL_POINT notifications
 
         await self._validate_crc(crc, offset)
 
