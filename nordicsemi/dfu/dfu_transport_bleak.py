@@ -10,7 +10,8 @@ from binascii import crc32
 from nordicsemi.dfu.package import Package
 
 # TODO no wild card imports
-from nordicsemi.dfu.ble_common import *
+from nordicsemi.dfu.ble_common import BLE_UUID
+from nordicsemi.dfu.operation import OP_CODE, RES_CODE, OBJ_TYPE, op_txd_pack, op_rxd_unpack
 
 from bleak import BleakClient, discover
 from bleak.exc import BleakError
@@ -146,7 +147,7 @@ class DfuDevice:
         returns payload (if any)
         """
         cpuuid = BLE_UUID.C_DFU_CONTROL_POINT
-        txdata = cp_txd_pack(opcode, **kwargs)
+        txdata = op_txd_pack(opcode, **kwargs)
         if not isinstance(txdata, bytearray):
             # bytes object not supported in txdbus
             txdata = bytearray(txdata)
@@ -177,7 +178,7 @@ class DfuDevice:
                 "CP Operation response timeout {}".format(opcode)
             )
 
-        return cp_rxd_unpack(opcode, rxdata)
+        return op_rxd_unpack(opcode, rxdata)
 
     async def dpkg_write(self, data):
         await self._bleclnt.write_gatt_char(
