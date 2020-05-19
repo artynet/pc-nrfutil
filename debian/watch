@@ -1,0 +1,4 @@
+version=4
+
+opts=filenamemangle=s/.+\/v?(\d\S+)\.tar\.gz/python-paho-mqtt-$1\.tar\.gz/ \
+  https://github.com/eclipse/paho.mqtt.python/tags .*/v?(\d\S+)\.tar\.gz
